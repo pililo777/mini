@@ -1,0 +1,10 @@
+//este programa demuestra un programa minimo
+//demo para robinson.  fecha. lunes 8 de agosto 2016
+
+
+a:=5;
+a:=a+4;
+print a;
+
+
+// fin del programa
