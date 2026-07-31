@@ -30,11 +30,28 @@ public class TProxyService extends VpnService {
     private static final int NOTIFICATION_ID = 7;
     private static final int SOCKS_PORT = 10808;
 
-    private static native boolean TProxyStartService(String configPath, int fd);
-    private static native boolean TProxyStopService();
+    /*
+     * These signatures intentionally match hev-socks5-tunnel 2.14.4
+     * (commit 4d6c334), whose JNI bridge registers Start/Stop as void and
+     * also registers TProxyGetStats. All three methods must exist with the
+     * exact signatures or JNI_OnLoad/RegisterNatives fails when the VPN
+     * service loads the native library.
+     */
+    private static native void TProxyStartService(String configPath, int fd);
+    private static native void TProxyStopService();
+    @SuppressWarnings("unused")
+    private static native long[] TProxyGetStats();
+
+    private static final Throwable NATIVE_LOAD_ERROR;
 
     static {
-        System.loadLibrary("hev-socks5-tunnel");
+        Throwable loadError = null;
+        try {
+            System.loadLibrary("hev-socks5-tunnel");
+        } catch (Throwable t) {
+            loadError = t;
+        }
+        NATIVE_LOAD_ERROR = loadError;
     }
 
     private final Object lock = new Object();
@@ -56,6 +73,12 @@ public class TProxyService extends VpnService {
         if (intent != null && ACTION_DISCONNECT.equals(intent.getAction())) {
             stopping = true;
             cleanup("off", "Desconectado");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        if (NATIVE_LOAD_ERROR != null) {
+            setState("error", "No se pudo cargar tun2socks: " + safeMessage(NATIVE_LOAD_ERROR));
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -142,8 +165,8 @@ public class TProxyService extends VpnService {
                 fos.write(nativeConfig.getBytes(StandardCharsets.UTF_8));
             }
 
-            nativeStarted = TProxyStartService(configFile.getAbsolutePath(), descriptor.getFd());
-            if (!nativeStarted) throw new IllegalStateException("No se pudo iniciar tun2socks");
+            TProxyStartService(configFile.getAbsolutePath(), descriptor.getFd());
+            nativeStarted = true;
 
             setState("on", "VPN activa: salida por Ubuntu");
             updateNotification("VPN activa - salida por Ubuntu");
@@ -156,7 +179,7 @@ public class TProxyService extends VpnService {
                 cleanup("error", "SSH se perdió; VPN cerrada automáticamente");
                 stopSelf();
             }
-        } catch (Exception e) {
+        } catch (Throwable e) {
             if (!stopping) {
                 cleanup("error", "VPN cerrada: " + safeMessage(e));
                 stopSelf();
@@ -164,22 +187,22 @@ public class TProxyService extends VpnService {
         }
     }
 
-    private String safeMessage(Exception e) {
+    private String safeMessage(Throwable e) {
         String message = e.getMessage();
         return (message == null || message.trim().isEmpty()) ? e.getClass().getSimpleName() : message;
     }
 
     private void cleanup(String state, String message) {
         synchronized (lock) {
+            if (nativeStarted) {
+                try { TProxyStopService(); } catch (Throwable ignored) { }
+                nativeStarted = false;
+            }
+
             ParcelFileDescriptor descriptor = tunFd;
             tunFd = null;
             if (descriptor != null) {
                 try { descriptor.close(); } catch (Exception ignored) { }
-            }
-
-            if (nativeStarted) {
-                try { TProxyStopService(); } catch (Throwable ignored) { }
-                nativeStarted = false;
             }
 
             SocksOverSshServer server = socksServer;
