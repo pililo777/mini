@@ -11,6 +11,7 @@ import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -227,6 +228,7 @@ class MainActivity : Activity() {
                     connectButton.text = "DESCONECTAR TERMINAL"
                     sendButton.isEnabled = true
                     appendTerminal("Huella verificada. Terminal conectada.\n\n")
+                    focusCommandInput()
                 }
 
                 val buffer = ByteArray(4096)
@@ -255,6 +257,14 @@ class MainActivity : Activity() {
                 }
             }
         }.start()
+    }
+
+    private fun focusCommandInput() {
+        commandField.requestFocus()
+        commandField.post {
+            val keyboard = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
+            keyboard?.showSoftInput(commandField, InputMethodManager.SHOW_IMPLICIT)
+        }
     }
 
     private fun requestVpn() {
