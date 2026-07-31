@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
+import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
 import android.widget.EditText
@@ -132,9 +133,9 @@ class MainActivity : Activity() {
         }
         terminalScroll = ScrollView(this).apply {
             setBackgroundColor(Color.BLACK)
-            addView(terminalView, ScrollView.LayoutParams(
-                ScrollView.LayoutParams.MATCH_PARENT,
-                ScrollView.LayoutParams.WRAP_CONTENT
+            addView(terminalView, ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
             ))
         }
         root.addView(terminalScroll, LinearLayout.LayoutParams(
