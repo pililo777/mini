@@ -1,18 +1,12 @@
-# Hola Mundo Android
+# Mini SSH
 
-Proyecto Android mínimo en Kotlin.
+Cliente SSH Android mínimo para conectarse a un servidor mediante usuario y contraseña.
 
-Al iniciar la aplicación muestra **Hola mundo** en el centro de la pantalla.
+## MVP
+- Host, puerto, usuario y contraseña.
+- Sesión shell interactiva.
+- Consola de salida.
+- Envío de comandos.
+- La contraseña no se guarda.
 
-## Requisitos
-
-- Android Studio compatible con AGP 9.3
-- JDK 17
-- Android SDK 36 o superior
-
-## Ejecutar
-
-1. Abre este repositorio con Android Studio.
-2. Espera a que termine la sincronización de Gradle.
-3. Selecciona un emulador o dispositivo Android.
-4. Pulsa **Run**.
+> Seguridad: esta primera versión acepta la clave del servidor sin verificarla. Antes de usarla fuera de una red controlada debe añadirse verificación de huella/known_hosts.

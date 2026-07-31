@@ -3,14 +3,18 @@ plugins {
 }
 
 android {
-    namespace = "com.pililo777.holamundo"
+    namespace = "com.pililo777.minissh"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.pililo777.holamundo"
+        applicationId = "com.pililo777.minissh"
         minSdk = 23
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "0.2"
     }
+}
+
+dependencies {
+    implementation("com.github.mwiede:jsch:2.28.4")
 }
