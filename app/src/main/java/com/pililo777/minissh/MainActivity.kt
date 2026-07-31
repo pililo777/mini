@@ -4,6 +4,7 @@ import android.app.Activity
 import android.graphics.Color
 import android.os.Bundle
 import android.text.InputType
+import android.util.Base64
 import android.view.Gravity
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
@@ -12,10 +13,14 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.jcraft.jsch.ChannelShell
+import com.jcraft.jsch.HostKey
+import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
+import com.jcraft.jsch.UserInfo
 import java.io.OutputStream
 import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.util.Properties
 
 class MainActivity : Activity() {
@@ -23,6 +28,7 @@ class MainActivity : Activity() {
     private lateinit var portField: EditText
     private lateinit var userField: EditText
     private lateinit var passwordField: EditText
+    private lateinit var fingerprintField: EditText
     private lateinit var connectButton: Button
     private lateinit var terminalView: TextView
     private lateinit var terminalScroll: ScrollView
@@ -36,7 +42,8 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
-        appendTerminal("Mini SSH listo. Introduce los datos de tu servidor.\n")
+        restoreConnectionData()
+        appendTerminal("Mini SSH listo. La huella SHA-256 del servidor es obligatoria.\n")
     }
 
     private fun buildUi() {
@@ -67,8 +74,11 @@ class MainActivity : Activity() {
             "Contraseña",
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         )
+        fingerprintField = field("Huella SHA256:...")
+
         root.addView(userField, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
         root.addView(passwordField, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
+        root.addView(fingerprintField, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
 
         connectButton = Button(this).apply {
             text = "CONECTAR"
@@ -137,24 +147,30 @@ class MainActivity : Activity() {
         val user = userField.text.toString().trim()
         val password = passwordField.text.toString()
         val port = portField.text.toString().toIntOrNull()
+        val expectedFingerprint = normalizeFingerprint(fingerprintField.text.toString())
 
-        if (host.isBlank() || user.isBlank() || password.isEmpty() || port == null || port !in 1..65535) {
-            appendTerminal("\nDatos de conexión incompletos o puerto inválido.\n")
+        if (
+            host.isBlank() || user.isBlank() || password.isEmpty() ||
+            port == null || port !in 1..65535 || expectedFingerprint == null
+        ) {
+            appendTerminal("\nCompleta servidor, puerto, usuario, contraseña y una huella SHA256 válida.\n")
             return
         }
 
         connectButton.isEnabled = false
-        appendTerminal("\nConectando a $user@$host:$port ...\n")
+        appendTerminal("\nVerificando identidad de $host y conectando como $user ...\n")
 
         Thread {
             var localSession: Session? = null
             var localShell: ChannelShell? = null
+            val fingerprintRepository = FingerprintHostKeyRepository(expectedFingerprint)
             try {
                 val jsch = JSch()
                 localSession = jsch.getSession(user, host, port).apply {
+                    setHostKeyRepository(fingerprintRepository)
                     setPassword(password)
                     setConfig(Properties().apply {
-                        put("StrictHostKeyChecking", "no")
+                        put("StrictHostKeyChecking", "yes")
                         put("PreferredAuthentications", "password,keyboard-interactive")
                     })
                     connect(12_000)
@@ -172,12 +188,14 @@ class MainActivity : Activity() {
                 shellOutput = output
 
                 runOnUiThread {
+                    saveConnectionData(host, port, user, expectedFingerprint)
                     passwordField.text.clear()
+                    fingerprintField.setText(expectedFingerprint)
                     connectButton.isEnabled = true
                     connectButton.text = "DESCONECTAR"
                     sendButton.isEnabled = true
-                    appendTerminal("Conectado.\n")
-                    appendTerminal("AVISO MVP: la huella del servidor todavía no se verifica.\n\n")
+                    appendTerminal("Huella verificada: $expectedFingerprint\n")
+                    appendTerminal("Conectado de forma segura.\n\n")
                 }
 
                 val buffer = ByteArray(4096)
@@ -189,7 +207,15 @@ class MainActivity : Activity() {
                     }
                 }
             } catch (e: Exception) {
-                appendTerminal("\nError SSH: ${e.message ?: e.javaClass.simpleName}\n")
+                val received = fingerprintRepository.lastReceivedFingerprint
+                if (received != null && !fingerprintsEqual(expectedFingerprint, received)) {
+                    appendTerminal("\nBLOQUEADO: la huella del servidor NO coincide.\n")
+                    appendTerminal("Esperada: $expectedFingerprint\n")
+                    appendTerminal("Recibida: $received\n")
+                    appendTerminal("No continúes hasta confirmar por otro medio que la clave del servidor cambió legítimamente.\n")
+                } else {
+                    appendTerminal("\nError SSH: ${e.message ?: e.javaClass.simpleName}\n")
+                }
             } finally {
                 try { localShell?.disconnect() } catch (_: Exception) {}
                 try { localSession?.disconnect() } catch (_: Exception) {}
@@ -242,6 +268,41 @@ class MainActivity : Activity() {
         sendButton.isEnabled = false
     }
 
+    private fun saveConnectionData(host: String, port: Int, user: String, fingerprint: String) {
+        getSharedPreferences("connection", MODE_PRIVATE).edit()
+            .putString("host", host)
+            .putInt("port", port)
+            .putString("user", user)
+            .putString("fingerprint", fingerprint)
+            .apply()
+    }
+
+    private fun restoreConnectionData() {
+        val prefs = getSharedPreferences("connection", MODE_PRIVATE)
+        hostField.setText(prefs.getString("host", ""))
+        portField.setText(prefs.getInt("port", 22).toString())
+        userField.setText(prefs.getString("user", ""))
+        fingerprintField.setText(prefs.getString("fingerprint", ""))
+    }
+
+    private fun normalizeFingerprint(value: String): String? {
+        val compact = value.trim().replace(" ", "")
+        if (compact.isBlank()) return null
+        val body = if (compact.startsWith("SHA256:", ignoreCase = true)) {
+            compact.substringAfter(':')
+        } else {
+            compact
+        }
+        if (body.length < 20) return null
+        return "SHA256:$body"
+    }
+
+    private fun fingerprintsEqual(first: String, second: String): Boolean =
+        MessageDigest.isEqual(
+            first.toByteArray(StandardCharsets.UTF_8),
+            second.toByteArray(StandardCharsets.UTF_8)
+        )
+
     private fun appendTerminal(text: String) {
         runOnUiThread {
             terminalView.append(text)
@@ -259,5 +320,43 @@ class MainActivity : Activity() {
         try { shell?.disconnect() } catch (_: Exception) {}
         try { session?.disconnect() } catch (_: Exception) {}
         super.onDestroy()
+    }
+
+    private class FingerprintHostKeyRepository(
+        private val expectedFingerprint: String
+    ) : HostKeyRepository {
+        @Volatile
+        var lastReceivedFingerprint: String? = null
+            private set
+
+        override fun check(host: String, key: ByteArray): Int {
+            val digest = MessageDigest.getInstance("SHA-256").digest(key)
+            val base64 = Base64.encodeToString(digest, Base64.NO_WRAP or Base64.NO_PADDING)
+            val received = "SHA256:$base64"
+            lastReceivedFingerprint = received
+
+            return if (
+                MessageDigest.isEqual(
+                    expectedFingerprint.toByteArray(StandardCharsets.UTF_8),
+                    received.toByteArray(StandardCharsets.UTF_8)
+                )
+            ) {
+                HostKeyRepository.OK
+            } else {
+                HostKeyRepository.CHANGED
+            }
+        }
+
+        override fun add(hostkey: HostKey, ui: UserInfo) = Unit
+
+        override fun remove(host: String, type: String) = Unit
+
+        override fun remove(host: String, type: String, key: ByteArray) = Unit
+
+        override fun getKnownHostsRepositoryID(): String = "Pinned SHA-256 fingerprint"
+
+        override fun getHostKey(): Array<HostKey> = emptyArray()
+
+        override fun getHostKey(host: String, type: String): Array<HostKey> = emptyArray()
     }
 }
