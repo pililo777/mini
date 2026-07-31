@@ -8,8 +8,11 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
@@ -38,6 +41,7 @@ class MainActivity : Activity() {
     private lateinit var terminalView: TextView
     private lateinit var terminalScroll: ScrollView
     private lateinit var commandField: EditText
+    private lateinit var ctrlButton: Button
     private lateinit var sendButton: Button
 
     @Volatile private var session: Session? = null
@@ -46,6 +50,8 @@ class MainActivity : Activity() {
 
     private val statusHandler = Handler(Looper.getMainLooper())
     private var pendingVpnConfig: VpnConfig? = null
+    private var ctrlArmed = false
+    private var internalCommandEdit = false
 
     private val statusPoll = object : Runnable {
         override fun run() {
@@ -131,6 +137,9 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.BLACK)
             setPadding(dp(10), dp(10), dp(10), dp(10))
             setTextIsSelectable(true)
+            setOnClickListener {
+                if (shell?.isConnected == true) focusCommandInput()
+            }
         }
         terminalScroll = ScrollView(this).apply {
             setBackgroundColor(Color.BLACK)
@@ -144,10 +153,37 @@ class MainActivity : Activity() {
         ).apply { topMargin = dp(8) })
 
         val commandRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        ctrlButton = Button(this).apply {
+            text = "CTRL"
+            isEnabled = false
+            setOnClickListener {
+                setCtrlArmed(!ctrlArmed)
+                focusCommandInput()
+            }
+        }
         commandField = field("Comando").apply {
             imeOptions = EditorInfo.IME_ACTION_SEND
-            setOnEditorActionListener { _, actionId, _ ->
-                if (actionId == EditorInfo.IME_ACTION_SEND) {
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+
+                override fun afterTextChanged(s: Editable?) {
+                    if (!ctrlArmed || internalCommandEdit || s.isNullOrEmpty()) return
+                    val controlCode = controlCodeFor(s.last()) ?: return
+
+                    internalCommandEdit = true
+                    try {
+                        s.delete(s.length - 1, s.length)
+                    } finally {
+                        internalCommandEdit = false
+                    }
+                    setCtrlArmed(false)
+                    sendRawControl(controlCode)
+                }
+            })
+            setOnEditorActionListener { _, actionId, event ->
+                val enterPressed = event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN
+                if (actionId == EditorInfo.IME_ACTION_SEND || enterPressed) {
                     sendCommand()
                     true
                 } else false
@@ -158,8 +194,9 @@ class MainActivity : Activity() {
             isEnabled = false
             setOnClickListener { sendCommand() }
         }
-        commandRow.addView(commandField, LinearLayout.LayoutParams(0, dp(52), 1f))
-        commandRow.addView(sendButton, LinearLayout.LayoutParams(dp(110), dp(52)).apply { marginStart = dp(8) })
+        commandRow.addView(ctrlButton, LinearLayout.LayoutParams(dp(78), dp(52)))
+        commandRow.addView(commandField, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(6) })
+        commandRow.addView(sendButton, LinearLayout.LayoutParams(dp(104), dp(52)).apply { marginStart = dp(6) })
         root.addView(commandRow)
 
         setContentView(root)
@@ -226,6 +263,7 @@ class MainActivity : Activity() {
                     passwordField.text.clear()
                     connectButton.isEnabled = true
                     connectButton.text = "DESCONECTAR TERMINAL"
+                    ctrlButton.isEnabled = true
                     sendButton.isEnabled = true
                     appendTerminal("Huella verificada. Terminal conectada.\n\n")
                     focusCommandInput()
@@ -261,10 +299,49 @@ class MainActivity : Activity() {
 
     private fun focusCommandInput() {
         commandField.requestFocus()
-        commandField.post {
+        commandField.setSelection(commandField.text.length)
+        commandField.postDelayed({
             val keyboard = getSystemService(INPUT_METHOD_SERVICE) as? InputMethodManager
             keyboard?.showSoftInput(commandField, InputMethodManager.SHOW_IMPLICIT)
+        }, 120)
+    }
+
+    private fun setCtrlArmed(armed: Boolean) {
+        ctrlArmed = armed
+        ctrlButton.text = if (armed) "CTRL*" else "CTRL"
+    }
+
+    private fun controlCodeFor(character: Char): Int? {
+        val upper = character.uppercaseChar()
+        return when {
+            upper in 'A'..'Z' -> upper.code - 'A'.code + 1
+            character == '@' -> 0
+            character == '[' -> 27
+            character == '\\' -> 28
+            character == ']' -> 29
+            character == '^' -> 30
+            character == '_' -> 31
+            character == '?' -> 127
+            else -> null
         }
+    }
+
+    private fun sendRawControl(controlCode: Int) {
+        val output = shellOutput
+        if (output == null || shell?.isConnected != true) {
+            appendTerminal("\nNo hay terminal SSH conectada.\n")
+            return
+        }
+        Thread {
+            try {
+                synchronized(output) {
+                    output.write(byteArrayOf(controlCode.toByte()))
+                    output.flush()
+                }
+            } catch (e: Exception) {
+                appendTerminal("\nError enviando CTRL: ${e.message ?: e.javaClass.simpleName}\n")
+            }
+        }.start()
     }
 
     private fun requestVpn() {
@@ -322,7 +399,15 @@ class MainActivity : Activity() {
     private fun sendCommand() {
         val command = commandField.text.toString()
         if (command.isEmpty()) return
-        commandField.text.clear()
+        setCtrlArmed(false)
+        internalCommandEdit = true
+        try {
+            commandField.text.clear()
+        } finally {
+            internalCommandEdit = false
+        }
+        focusCommandInput()
+
         val output = shellOutput
         if (output == null || shell?.isConnected != true) {
             appendTerminal("\nNo hay terminal SSH conectada.\n")
@@ -330,8 +415,10 @@ class MainActivity : Activity() {
         }
         Thread {
             try {
-                output.write((command + "\n").toByteArray(StandardCharsets.UTF_8))
-                output.flush()
+                synchronized(output) {
+                    output.write((command + "\n").toByteArray(StandardCharsets.UTF_8))
+                    output.flush()
+                }
             } catch (e: Exception) {
                 appendTerminal("\nError enviando comando: ${e.message ?: e.javaClass.simpleName}\n")
             }
@@ -350,6 +437,8 @@ class MainActivity : Activity() {
     private fun showTerminalDisconnected() {
         connectButton.isEnabled = true
         connectButton.text = "CONECTAR TERMINAL"
+        setCtrlArmed(false)
+        ctrlButton.isEnabled = false
         sendButton.isEnabled = false
     }
 
