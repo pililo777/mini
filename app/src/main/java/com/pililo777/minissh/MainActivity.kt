@@ -1,10 +1,14 @@
 package com.pililo777.minissh
 
 import android.app.Activity
+import android.content.Intent
 import android.graphics.Color
+import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
-import android.util.Base64
 import android.view.Gravity
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
@@ -13,14 +17,10 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import com.jcraft.jsch.ChannelShell
-import com.jcraft.jsch.HostKey
-import com.jcraft.jsch.HostKeyRepository
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
-import com.jcraft.jsch.UserInfo
 import java.io.OutputStream
 import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
 import java.util.Properties
 
 class MainActivity : Activity() {
@@ -30,6 +30,9 @@ class MainActivity : Activity() {
     private lateinit var passwordField: EditText
     private lateinit var fingerprintField: EditText
     private lateinit var connectButton: Button
+    private lateinit var vpnButton: Button
+    private lateinit var disconnectAllButton: Button
+    private lateinit var vpnStatusView: TextView
     private lateinit var terminalView: TextView
     private lateinit var terminalScroll: ScrollView
     private lateinit var commandField: EditText
@@ -39,11 +42,22 @@ class MainActivity : Activity() {
     @Volatile private var shell: ChannelShell? = null
     @Volatile private var shellOutput: OutputStream? = null
 
+    private val statusHandler = Handler(Looper.getMainLooper())
+    private var pendingVpnConfig: VpnConfig? = null
+
+    private val statusPoll = object : Runnable {
+        override fun run() {
+            refreshVpnStatus()
+            statusHandler.postDelayed(this, 1_000)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildUi()
         restoreConnectionData()
-        appendTerminal("Mini SSH listo. La huella SHA-256 del servidor es obligatoria.\n")
+        appendTerminal("Mini SSH 0.4 listo. SSH y VPN requieren huella SHA-256.\n")
+        statusHandler.post(statusPoll)
     }
 
     private fun buildUi() {
@@ -53,14 +67,13 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.rgb(20, 20, 20))
         }
 
-        val title = TextView(this).apply {
+        root.addView(TextView(this).apply {
             text = "Mini SSH"
             textSize = 24f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER_HORIZONTAL
             setPadding(0, 0, 0, dp(8))
-        }
-        root.addView(title)
+        })
 
         val hostRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         hostField = field("Servidor / IP")
@@ -70,23 +83,44 @@ class MainActivity : Activity() {
         root.addView(hostRow)
 
         userField = field("Usuario")
-        passwordField = field(
-            "Contraseña",
-            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        )
+        passwordField = field("Contraseña", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
         fingerprintField = field("Huella SHA256:...")
-
-        root.addView(userField, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
-        root.addView(passwordField, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
-        root.addView(fingerprintField, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
+        root.addView(userField, fullWidth52())
+        root.addView(passwordField, fullWidth52())
+        root.addView(fingerprintField, fullWidth52())
 
         connectButton = Button(this).apply {
-            text = "CONECTAR"
-            setOnClickListener {
-                if (shell?.isConnected == true) disconnect() else connect()
-            }
+            text = "CONECTAR TERMINAL"
+            setOnClickListener { if (shell?.isConnected == true) disconnectTerminal() else connectTerminal() }
         }
         root.addView(connectButton)
+
+        vpnStatusView = TextView(this).apply {
+            text = "VPN: desconectada"
+            setTextColor(Color.LTGRAY)
+            setPadding(dp(4), dp(8), dp(4), dp(4))
+        }
+        root.addView(vpnStatusView)
+
+        val vpnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        vpnButton = Button(this).apply {
+            text = "ACTIVAR VPN"
+            setOnClickListener {
+                val state = getSharedPreferences("vpn", MODE_PRIVATE).getString("state", "off")
+                if (state == "on" || state == "connecting") disconnectVpn() else requestVpn()
+            }
+        }
+        disconnectAllButton = Button(this).apply {
+            text = "DESCONECTAR TODO"
+            setOnClickListener {
+                disconnectTerminal()
+                disconnectVpn()
+                appendTerminal("\nTerminal y VPN desconectadas. Android vuelve a su conexión normal.\n")
+            }
+        }
+        vpnRow.addView(vpnButton, LinearLayout.LayoutParams(0, dp(52), 1f))
+        vpnRow.addView(disconnectAllButton, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(8) })
+        root.addView(vpnRow)
 
         terminalView = TextView(this).apply {
             textSize = 14f
@@ -104,9 +138,7 @@ class MainActivity : Activity() {
             ))
         }
         root.addView(terminalScroll, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            0,
-            1f
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
         ).apply { topMargin = dp(8) })
 
         val commandRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -131,6 +163,8 @@ class MainActivity : Activity() {
         setContentView(root)
     }
 
+    private fun fullWidth52() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52))
+
     private fun field(hintText: String, inputTypeValue: Int = InputType.TYPE_CLASS_TEXT): EditText =
         EditText(this).apply {
             hint = hintText
@@ -142,40 +176,39 @@ class MainActivity : Activity() {
             setPadding(dp(10), 0, dp(10), 0)
         }
 
-    private fun connect() {
+    private fun readConfig(requirePassword: Boolean = true): VpnConfig? {
         val host = hostField.text.toString().trim()
         val user = userField.text.toString().trim()
         val password = passwordField.text.toString()
         val port = portField.text.toString().toIntOrNull()
-        val expectedFingerprint = normalizeFingerprint(fingerprintField.text.toString())
+        val fingerprint = PinnedHostKeyRepository.normalize(fingerprintField.text.toString())
+        if (host.isBlank() || user.isBlank() || port == null || port !in 1..65535 || fingerprint == null) return null
+        if (requirePassword && password.isEmpty()) return null
+        return VpnConfig(host, port, user, password, fingerprint)
+    }
 
-        if (
-            host.isBlank() || user.isBlank() || password.isEmpty() ||
-            port == null || port !in 1..65535 || expectedFingerprint == null
-        ) {
-            appendTerminal("\nCompleta servidor, puerto, usuario, contraseña y una huella SHA256 válida.\n")
+    private fun connectTerminal() {
+        val cfg = readConfig() ?: run {
+            appendTerminal("\nCompleta servidor, puerto, usuario, contraseña y huella SHA256.\n")
             return
         }
-
         connectButton.isEnabled = false
-        appendTerminal("\nVerificando identidad de $host y conectando como $user ...\n")
+        appendTerminal("\nVerificando ${cfg.host} y abriendo terminal SSH...\n")
 
         Thread {
             var localSession: Session? = null
             var localShell: ChannelShell? = null
-            val fingerprintRepository = FingerprintHostKeyRepository(expectedFingerprint)
+            val repository = PinnedHostKeyRepository(cfg.fingerprint)
             try {
-                val jsch = JSch()
-                localSession = jsch.getSession(user, host, port).apply {
-                    setHostKeyRepository(fingerprintRepository)
-                    setPassword(password)
+                localSession = JSch().getSession(cfg.user, cfg.host, cfg.port).apply {
+                    setHostKeyRepository(repository)
+                    setPassword(cfg.password)
                     setConfig(Properties().apply {
                         put("StrictHostKeyChecking", "yes")
                         put("PreferredAuthentications", "password,keyboard-interactive")
                     })
-                    connect(12_000)
+                    connect(15_000)
                 }
-
                 localShell = localSession.openChannel("shell") as ChannelShell
                 localShell.setPty(true)
                 localShell.setPtyType("dumb")
@@ -186,44 +219,36 @@ class MainActivity : Activity() {
                 session = localSession
                 shell = localShell
                 shellOutput = output
-
                 runOnUiThread {
-                    saveConnectionData(host, port, user, expectedFingerprint)
+                    saveConnectionData(cfg)
                     passwordField.text.clear()
-                    fingerprintField.setText(expectedFingerprint)
                     connectButton.isEnabled = true
-                    connectButton.text = "DESCONECTAR"
+                    connectButton.text = "DESCONECTAR TERMINAL"
                     sendButton.isEnabled = true
-                    appendTerminal("Huella verificada: $expectedFingerprint\n")
-                    appendTerminal("Conectado de forma segura.\n\n")
+                    appendTerminal("Huella verificada. Terminal conectada.\n\n")
                 }
 
                 val buffer = ByteArray(4096)
                 while (localShell.isConnected) {
                     val count = input.read(buffer)
                     if (count < 0) break
-                    if (count > 0) {
-                        appendTerminal(String(buffer, 0, count, StandardCharsets.UTF_8))
-                    }
+                    if (count > 0) appendTerminal(String(buffer, 0, count, StandardCharsets.UTF_8))
                 }
             } catch (e: Exception) {
-                val received = fingerprintRepository.lastReceivedFingerprint
-                if (received != null && !fingerprintsEqual(expectedFingerprint, received)) {
-                    appendTerminal("\nBLOQUEADO: la huella del servidor NO coincide.\n")
-                    appendTerminal("Esperada: $expectedFingerprint\n")
-                    appendTerminal("Recibida: $received\n")
-                    appendTerminal("No continúes hasta confirmar por otro medio que la clave del servidor cambió legítimamente.\n")
+                val received = repository.lastReceivedFingerprint
+                if (received != null && !PinnedHostKeyRepository.same(cfg.fingerprint, received)) {
+                    appendTerminal("\nBLOQUEADO: huella SSH distinta.\nEsperada: ${cfg.fingerprint}\nRecibida: $received\n")
                 } else {
                     appendTerminal("\nError SSH: ${e.message ?: e.javaClass.simpleName}\n")
                 }
             } finally {
-                try { localShell?.disconnect() } catch (_: Exception) {}
-                try { localSession?.disconnect() } catch (_: Exception) {}
+                try { localShell?.disconnect() } catch (_: Exception) { }
+                try { localSession?.disconnect() } catch (_: Exception) { }
                 if (shell === localShell) {
                     shell = null
                     session = null
                     shellOutput = null
-                    runOnUiThread { showDisconnected() }
+                    runOnUiThread { showTerminalDisconnected() }
                 } else {
                     runOnUiThread { connectButton.isEnabled = true }
                 }
@@ -231,17 +256,67 @@ class MainActivity : Activity() {
         }.start()
     }
 
+    private fun requestVpn() {
+        val cfg = readConfig() ?: run {
+            appendTerminal("\nPara activar VPN completa los datos SSH y la contraseña.\n")
+            return
+        }
+        saveConnectionData(cfg)
+        pendingVpnConfig = cfg
+        val prepare = VpnService.prepare(this)
+        if (prepare != null) {
+            startActivityForResult(prepare, VPN_REQUEST)
+        } else {
+            startVpn(cfg)
+            pendingVpnConfig = null
+        }
+    }
+
+    @Deprecated("Deprecated in Android API; kept for minSdk compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == VPN_REQUEST) {
+            val cfg = pendingVpnConfig
+            pendingVpnConfig = null
+            if (resultCode == RESULT_OK && cfg != null) startVpn(cfg)
+            else appendTerminal("\nAndroid no autorizó la VPN.\n")
+        }
+    }
+
+    private fun startVpn(cfg: VpnConfig) {
+        val intent = Intent(this, TProxyService::class.java)
+            .setAction(TProxyService.ACTION_CONNECT)
+            .putExtra(TProxyService.EXTRA_HOST, cfg.host)
+            .putExtra(TProxyService.EXTRA_PORT, cfg.port)
+            .putExtra(TProxyService.EXTRA_USER, cfg.user)
+            .putExtra(TProxyService.EXTRA_PASSWORD, cfg.password)
+            .putExtra(TProxyService.EXTRA_FINGERPRINT, cfg.fingerprint)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+        passwordField.text.clear()
+        appendTerminal("\nActivando VPN SSH. La VPN solo se establecerá cuando SSH esté listo.\n")
+    }
+
+    private fun disconnectVpn() {
+        startService(Intent(this, TProxyService::class.java).setAction(TProxyService.ACTION_DISCONNECT))
+    }
+
+    private fun refreshVpnStatus() {
+        val prefs = getSharedPreferences("vpn", MODE_PRIVATE)
+        val state = prefs.getString("state", "off") ?: "off"
+        val message = prefs.getString("message", "Desconectada") ?: "Desconectada"
+        vpnStatusView.text = "VPN: $message"
+        vpnButton.text = if (state == "on" || state == "connecting") "DESACTIVAR VPN" else "ACTIVAR VPN"
+    }
+
     private fun sendCommand() {
         val command = commandField.text.toString()
         if (command.isEmpty()) return
         commandField.text.clear()
-
         val output = shellOutput
         if (output == null || shell?.isConnected != true) {
-            appendTerminal("\nNo hay una sesión SSH conectada.\n")
+            appendTerminal("\nNo hay terminal SSH conectada.\n")
             return
         }
-
         Thread {
             try {
                 output.write((command + "\n").toByteArray(StandardCharsets.UTF_8))
@@ -252,28 +327,27 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    private fun disconnect() {
-        appendTerminal("\nDesconectando...\n")
-        try { shell?.disconnect() } catch (_: Exception) {}
-        try { session?.disconnect() } catch (_: Exception) {}
+    private fun disconnectTerminal() {
+        try { shell?.disconnect() } catch (_: Exception) { }
+        try { session?.disconnect() } catch (_: Exception) { }
         shell = null
         session = null
         shellOutput = null
-        showDisconnected()
+        showTerminalDisconnected()
     }
 
-    private fun showDisconnected() {
+    private fun showTerminalDisconnected() {
         connectButton.isEnabled = true
-        connectButton.text = "CONECTAR"
+        connectButton.text = "CONECTAR TERMINAL"
         sendButton.isEnabled = false
     }
 
-    private fun saveConnectionData(host: String, port: Int, user: String, fingerprint: String) {
+    private fun saveConnectionData(cfg: VpnConfig) {
         getSharedPreferences("connection", MODE_PRIVATE).edit()
-            .putString("host", host)
-            .putInt("port", port)
-            .putString("user", user)
-            .putString("fingerprint", fingerprint)
+            .putString("host", cfg.host)
+            .putInt("port", cfg.port)
+            .putString("user", cfg.user)
+            .putString("fingerprint", cfg.fingerprint)
             .apply()
     }
 
@@ -284,24 +358,6 @@ class MainActivity : Activity() {
         userField.setText(prefs.getString("user", ""))
         fingerprintField.setText(prefs.getString("fingerprint", ""))
     }
-
-    private fun normalizeFingerprint(value: String): String? {
-        val compact = value.trim().replace(" ", "")
-        if (compact.isBlank()) return null
-        val body = if (compact.startsWith("SHA256:", ignoreCase = true)) {
-            compact.substringAfter(':')
-        } else {
-            compact
-        }
-        if (body.length < 20) return null
-        return "SHA256:$body"
-    }
-
-    private fun fingerprintsEqual(first: String, second: String): Boolean =
-        MessageDigest.isEqual(
-            first.toByteArray(StandardCharsets.UTF_8),
-            second.toByteArray(StandardCharsets.UTF_8)
-        )
 
     private fun appendTerminal(text: String) {
         runOnUiThread {
@@ -317,46 +373,20 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onDestroy() {
-        try { shell?.disconnect() } catch (_: Exception) {}
-        try { session?.disconnect() } catch (_: Exception) {}
+        statusHandler.removeCallbacks(statusPoll)
+        disconnectTerminal()
         super.onDestroy()
     }
 
-    private class FingerprintHostKeyRepository(
-        private val expectedFingerprint: String
-    ) : HostKeyRepository {
-        @Volatile
-        var lastReceivedFingerprint: String? = null
-            private set
+    private data class VpnConfig(
+        val host: String,
+        val port: Int,
+        val user: String,
+        val password: String,
+        val fingerprint: String
+    )
 
-        override fun check(host: String, key: ByteArray): Int {
-            val digest = MessageDigest.getInstance("SHA-256").digest(key)
-            val base64 = Base64.encodeToString(digest, Base64.NO_WRAP or Base64.NO_PADDING)
-            val received = "SHA256:$base64"
-            lastReceivedFingerprint = received
-
-            return if (
-                MessageDigest.isEqual(
-                    expectedFingerprint.toByteArray(StandardCharsets.UTF_8),
-                    received.toByteArray(StandardCharsets.UTF_8)
-                )
-            ) {
-                HostKeyRepository.OK
-            } else {
-                HostKeyRepository.CHANGED
-            }
-        }
-
-        override fun add(hostkey: HostKey, ui: UserInfo) = Unit
-
-        override fun remove(host: String, type: String) = Unit
-
-        override fun remove(host: String, type: String, key: ByteArray) = Unit
-
-        override fun getKnownHostsRepositoryID(): String = "Pinned SHA-256 fingerprint"
-
-        override fun getHostKey(): Array<HostKey> = emptyArray()
-
-        override fun getHostKey(host: String, type: String): Array<HostKey> = emptyArray()
+    companion object {
+        private const val VPN_REQUEST = 2201
     }
 }

@@ -1,25 +1,25 @@
 # Mini SSH
 
-Cliente SSH Android mínimo para conectarse a un servidor mediante usuario y contraseña.
+Cliente SSH Android mínimo con terminal y túnel VPN SSH fail-open.
 
-## MVP
-- Host, puerto, usuario y contraseña.
-- Huella SHA-256 del servidor obligatoria.
-- Verificación de identidad del servidor antes de autenticar.
-- Sesión shell interactiva.
-- Consola de salida.
-- Envío de comandos.
-- Recuerda host, puerto, usuario y huella.
+## Funciones
+- SSH por contraseña con huella SHA-256 obligatoria.
+- Terminal interactiva.
+- VPN Android para enviar tráfico TCP por Ubuntu.
+- DNS remoto mediante MapDNS de hev-socks5-tunnel.
+- Si SSH cae, la interfaz VPN se cierra para recuperar Internet normal.
+- Notificación persistente con botón Desconectar.
+- Botón Desconectar todo en la app.
 - La contraseña no se guarda.
 
-## Obtener la huella en Ubuntu
+## VPN
+La VPN usa `VpnService` + `hev-socks5-tunnel` y un proxy SOCKS5 local que abre conexiones `direct-tcpip` sobre SSH.
 
-Para la clave ED25519 del servidor:
+La versión 0.4 enruta TCP. UDP/QUIC no se tuneliza todavía; Chrome puede usar HTTPS sobre TCP cuando QUIC no está disponible.
 
+## Huella Ubuntu
 ```bash
 sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256
 ```
 
-Copia el valor que empieza por `SHA256:` y pégalo en Mini SSH.
-
-Si la huella presentada por el servidor no coincide, Mini SSH bloquea la conexión.
+Copia el valor `SHA256:...` en la app.
