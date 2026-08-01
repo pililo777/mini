@@ -27,13 +27,6 @@ import android.widget.TextView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
-import com.jcraft.jsch.ChannelShell
-import com.jcraft.jsch.JSch
-import com.jcraft.jsch.Session
-import com.jcraft.jsch.Logger
-import java.nio.charset.StandardCharsets
-import java.util.Properties
-import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
     companion object {
@@ -57,14 +50,30 @@ class MainActivity : Activity() {
     private lateinit var ctrlButton: Button
     private lateinit var sendButton: Button
     private val terminalBridge = TerminalBridge()
-    private val sshWriteExecutor = Executors.newSingleThreadExecutor()
-
-    @Volatile private var session: Session? = null
-    @Volatile private var shell: ChannelShell? = null
-    @Volatile private var shellOutput: java.io.OutputStream? = null
     @Volatile private var terminalConnected = false
-    @Volatile private var connectionGeneration = 0L
-    @Volatile private var disconnectReason = "none"
+    private val sshController = SshSessionController(object : SshSessionController.Listener {
+        override fun onStateChanged(state: SshConnectionState) {
+            runOnUiThread {
+                val connected = state == SshConnectionState.Connected
+                terminalConnected = connected
+                updateTerminalControls(connected)
+                if (connected) {
+                    appendTerminal("Huella verificada. Terminal conectada.\n\n")
+                    focusCommandInput()
+                }
+                if (state is SshConnectionState.Error) {
+                    appendTerminal("\nError SSH: ${state.message}\n")
+                }
+            }
+        }
+
+        override fun onOutput(bytes: ByteArray) = runOnUiThread { onRemoteBytes(bytes) }
+        override fun onError(message: String, throwable: Throwable?) = runOnUiThread {
+            if (message != "No hay terminal SSH conectada.") appendTerminal("\n$message\n")
+            else appendTerminal("\n$message\n")
+        }
+        override fun onEof() = runOnUiThread { debug("controller EOF") }
+    })
 
     private val statusHandler = Handler(Looper.getMainLooper())
     private var pendingVpnConfig: VpnConfig? = null
@@ -82,12 +91,6 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        JSch.setLogger(object : Logger {
-            override fun isEnabled(level: Int): Boolean = true
-            override fun log(level: Int, message: String?) {
-                debug("JSCH level=$level ${message ?: ""}")
-            }
-        })
         debug("onCreate")
         buildUi()
         restoreConnectionData()
@@ -154,8 +157,8 @@ class MainActivity : Activity() {
         connectButton = Button(this).apply {
             text = "CONECTAR TERMINAL"
             setOnClickListener {
-                debug("UI_ACTION terminal_${if (shell?.isConnected == true) "disconnect" else "connect"}_button thread=${Thread.currentThread().name} ${channelState(session, shell)}")
-                if (shell?.isConnected == true) disconnectTerminal() else connectTerminal()
+                debug("UI_ACTION terminal_${if (sshController.isConnected()) "disconnect" else "connect"}_button thread=${Thread.currentThread().name}")
+                if (sshController.isConnected()) disconnectTerminal() else connectTerminal()
             }
         }
         rootView.addView(connectButton)
@@ -195,7 +198,7 @@ class MainActivity : Activity() {
             setPadding(dp(10), dp(10), dp(10), dp(10))
             setTextIsSelectable(true)
             setOnClickListener {
-                if (shell?.isConnected == true) focusCommandInput()
+                if (sshController.isConnected()) focusCommandInput()
             }
         }
         terminalScroll = ScrollView(this).apply {
@@ -266,7 +269,7 @@ class MainActivity : Activity() {
             text = "ENVIAR"
             isEnabled = false
             setOnClickListener {
-                debug("UI_ACTION send_button thread=${Thread.currentThread().name} ${channelState(session, shell)}")
+                debug("UI_ACTION send_button thread=${Thread.currentThread().name} state=${sshController.currentState()}")
                 sendCommand()
             }
         }
@@ -312,93 +315,11 @@ class MainActivity : Activity() {
         connectButton.isEnabled = false
         appendTerminal("\nVerificando ${cfg.host} y abriendo terminal SSH...\n")
 
-        val generation = synchronized(this) { ++connectionGeneration }
-        disconnectReason = "none"
-        Thread {
-            var localSession: Session? = null
-            var localShell: ChannelShell? = null
-            val repository = PinnedHostKeyRepository(cfg.fingerprint)
-            try {
-                localSession = JSch().getSession(cfg.user, cfg.host, cfg.port).apply {
-                    setHostKeyRepository(repository)
-                    setPassword(cfg.password)
-                    setConfig(Properties().apply {
-                        put("StrictHostKeyChecking", "yes")
-                        put("PreferredAuthentications", "password,keyboard-interactive")
-                    })
-                    setConfig("cipher.c2s", "aes128-ctr")
-                    setConfig("cipher.s2c", "aes128-ctr")
-                    setConfig("mac.c2s", "hmac-sha2-256")
-                    setConfig("mac.s2c", "hmac-sha2-256")
-                    setConfig("compression.c2s", "none")
-                    setConfig("compression.s2c", "none")
-                    setServerAliveInterval(30_000)
-                    setServerAliveCountMax(3)
-                    connect(15_000)
-                }
-                debug("conn=$generation session connected id=${System.identityHashCode(localSession)} thread=${Thread.currentThread().name}")
-                localShell = localSession.openChannel("shell") as ChannelShell
-                // Dynamic setPtySize() calls corrupted JSch/Android transport; keep PTY sizing disabled until safely proven.
-                localShell.setPty(true)
-                localShell.setPtyType("xterm")
-                val input = localShell.inputStream
-                val output = localShell.outputStream
-                localShell.connect(8_000)
-                debug("conn=$generation shell connected id=${System.identityHashCode(localShell)} sessionConnected=${localSession.isConnected} channelConnected=${localShell.isConnected}")
-
-                session = localSession
-                shell = localShell
-                shellOutput = output
-                terminalConnected = true
-                runOnUiThread {
-                    saveConnectionData(cfg)
-                    passwordField.text.clear()
-                    updateTerminalControls(true)
-                    appendTerminal("Huella verificada. Terminal conectada.\n\n")
-                    focusCommandInput()
-                }
-
-                val buffer = ByteArray(4096)
-                debug("conn=$generation read loop started thread=${Thread.currentThread().name}")
-                while (localShell.isConnected && generation == connectionGeneration) {
-                    val count = input.read(buffer)
-                    if (count < 0) {
-                        debug("conn=$generation read eof ${channelState(localSession, localShell)} reason=$disconnectReason")
-                        break
-                    }
-                    if (count > 0) {
-                        debug("read bytes=$count")
-                        val preview = buffer.take(count.coerceAtMost(64)).joinToString(" ") {
-                            String.format("%02X", it)
-                        }
-                        debug("read preview=$preview")
-                        onRemoteBytes(buffer, count)
-                    }
-                }
-                debug("conn=$generation read loop finished ${channelState(localSession, localShell)} reason=$disconnectReason")
-            } catch (e: Exception) {
-                debug("conn=$generation connect/read exception ${e.javaClass.name}: ${e.message}\n${Log.getStackTraceString(e)} state=${channelState(localSession, localShell)}")
-                val received = repository.lastReceivedFingerprint
-                if (received != null && !PinnedHostKeyRepository.same(cfg.fingerprint, received)) {
-                    appendTerminal("\nBLOQUEADO: huella SSH distinta.\nEsperada: ${cfg.fingerprint}\nRecibida: $received\n")
-                } else {
-                    appendTerminal("\nError SSH: ${e.message ?: e.javaClass.simpleName}\n")
-                }
-            } finally {
-                debug("conn=$generation finally reason=$disconnectReason localShellConnected=${localShell?.isConnected == true} sameShell=${shell === localShell}")
-                try { localShell?.disconnect() } catch (e: Exception) { debug("conn=$generation shell disconnect exception ${Log.getStackTraceString(e)}") }
-                try { localSession?.disconnect() } catch (e: Exception) { debug("conn=$generation session disconnect exception ${Log.getStackTraceString(e)}") }
-                if (shell === localShell) {
-                    shell = null
-                    session = null
-                    shellOutput = null
-                    terminalConnected = false
-                    runOnUiThread { showTerminalDisconnected() }
-                } else {
-                    runOnUiThread { connectButton.isEnabled = true }
-                }
-            }
-        }.start()
+        val passwordChars = cfg.password.toCharArray()
+        sshController.connect(SshConnectionConfig(cfg.host, cfg.port, cfg.user, passwordChars, cfg.fingerprint))
+        saveConnectionData(cfg)
+        passwordChars.fill('\u0000')
+        passwordField.text.clear()
     }
 
     private fun focusCommandInput() {
@@ -431,65 +352,20 @@ class MainActivity : Activity() {
     }
 
     private fun sendRawControl(controlCode: Int) {
-        val output = shellOutput
-        if (output == null || shell?.isConnected != true) {
-            debug("sendRawControl rejected controlCode=$controlCode shellConnected=${shell?.isConnected == true}")
-            appendTerminal("\nNo hay terminal SSH conectada.\n")
-            return
-        }
-        sshWriteExecutor.execute {
-            try {
-                debug("sendRawControl write controlCode=$controlCode")
-                synchronized(output) {
-                    output.write(byteArrayOf(controlCode.toByte()))
-                    output.flush()
-                }
-            } catch (e: Exception) {
-                debug("sendRawControl exception ${e.javaClass.simpleName}: ${e.message}")
-                appendTerminal("\nError enviando CTRL: ${e.message ?: e.javaClass.simpleName}\n")
-            }
-        }
-    }
-
-    private fun sendBytes(bytes: ByteArray) {
-        val output = shellOutput
-        val generation = connectionGeneration
-        val queuedAt = SystemClock.elapsedRealtime()
-        if (output == null || shell?.isConnected != true) {
-            debug("sendBytes rejected size=${bytes.size} shellConnected=${shell?.isConnected == true}")
-            appendTerminal("\nNo hay terminal SSH conectada.\n")
-            return
-        }
-        debug("sendBytes queued conn=$generation at=$queuedAt output=${System.identityHashCode(output)} hex=${bytes.joinToString(" ") { String.format("%02X", it) }} state=${channelState(session, shell)}")
-        sshWriteExecutor.execute {
-            try {
-                val preview = bytes.take(8).joinToString(" ") { String.format("%02X", it) }
-                debug("sendBytes write_begin conn=$generation at=${SystemClock.elapsedRealtime()} size=${bytes.size} hex=${bytes.joinToString(" ") { String.format("%02X", it) }} output=${System.identityHashCode(output)} thread=${Thread.currentThread().name} state=${channelState(session, shell)}")
-                synchronized(output) {
-                    output.write(bytes)
-                    debug("sendBytes write_ok conn=$generation at=${SystemClock.elapsedRealtime()}")
-                    output.flush()
-                    debug("sendBytes flush_ok conn=$generation at=${SystemClock.elapsedRealtime()} state=${channelState(session, shell)}")
-                }
-            } catch (e: Exception) {
-                debug("sendBytes exception conn=$generation ${e.javaClass.name}: ${e.message} at=${SystemClock.elapsedRealtime()} state=${channelState(session, shell)}\n${Log.getStackTraceString(e)}")
-                appendTerminal("\nError enviando bytes: ${e.message ?: e.javaClass.simpleName}\n")
-            }
-        }
+        sshController.sendControl(controlCode.toByte())
     }
 
     private fun sendEnter() {
         val command = commandField.text.toString()
         // A terminal Enter is carriage return; Windows PTYs otherwise may only display LF without executing the line.
-        val payload = command.toByteArray(StandardCharsets.UTF_8) + byteArrayOf('\r'.code.toByte())
-        debug("sendEnter commandLength=${command.length} commandPreview=${command.take(48).replace(Regex("[\\r\\n]"), "?")} bytes=${payload.joinToString(" ") { String.format("%02X", it) }} terminator=CR")
+        debug("sendEnter commandLength=${command.length} terminator=CR")
         internalCommandEdit = true
         try {
             commandField.text.clear()
         } finally {
             internalCommandEdit = false
         }
-        sendBytes(payload)
+        sshController.sendCommand(command)
         focusCommandInput()
     }
 
@@ -549,8 +425,8 @@ class MainActivity : Activity() {
         val now = SystemClock.uptimeMillis()
         if (now - lastSendTriggerAt < 250) return
         lastSendTriggerAt = now
-        debug("sendCommand triggered conn=$connectionGeneration terminalConnected=$terminalConnected shellConnected=${shell?.isConnected == true} outputReady=${shellOutput != null} thread=${Thread.currentThread().name} state=${channelState(session, shell)}")
-        if (!terminalConnected || shell?.isConnected != true || shellOutput == null) {
+        debug("sendCommand triggered terminalConnected=$terminalConnected thread=${Thread.currentThread().name} state=${sshController.currentState()}")
+        if (!terminalConnected || !sshController.isConnected()) {
             appendTerminal("\nNo hay terminal SSH conectada.\n")
             return
         }
@@ -559,14 +435,8 @@ class MainActivity : Activity() {
     }
 
     private fun disconnectTerminal() {
-        disconnectReason = "user_or_activity"
-        synchronized(this) { ++connectionGeneration }
-        debug("disconnectTerminal requested thread=${Thread.currentThread().name} conn=$connectionGeneration reason=$disconnectReason ${channelState(session, shell)}\n${Throwable().stackTraceToString()}")
-        try { shell?.disconnect() } catch (e: Exception) { debug("disconnect shell exception ${Log.getStackTraceString(e)}") }
-        try { session?.disconnect() } catch (e: Exception) { debug("disconnect session exception ${Log.getStackTraceString(e)}") }
-        shell = null
-        session = null
-        shellOutput = null
+        debug("disconnectTerminal requested thread=${Thread.currentThread().name}")
+        sshController.disconnect("user_or_activity")
         terminalConnected = false
         showTerminalDisconnected()
     }
@@ -607,8 +477,8 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun onRemoteBytes(bytes: ByteArray, length: Int) {
-        terminalBridge.feed(bytes, length)
+    private fun onRemoteBytes(bytes: ByteArray) {
+        terminalBridge.feed(bytes, bytes.size)
         appendTerminal(terminalBridge.render())
     }
 
@@ -617,16 +487,14 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         statusHandler.removeCallbacks(statusPoll)
         debug("onDestroy")
-        disconnectTerminal()
+        // Future phase: ownership will move to SshConnectionService.
+        sshController.close()
         super.onDestroy()
     }
 
     private fun debug(message: String) {
         Log.d(TAG, message)
     }
-
-    private fun channelState(s: Session?, c: ChannelShell?): String =
-        "session=${System.identityHashCode(s)} sessionConnected=${s?.isConnected} channel=${System.identityHashCode(c)} channelConnected=${c?.isConnected} channelClosed=${c?.isClosed} eof=${c?.isEOF} exitStatus=${c?.exitStatus}"
 
     private data class VpnConfig(
         val host: String,
