@@ -4,3 +4,7 @@ local.properties
 **/build/
 *.iml
 app/src/main/jni/hev-socks5-tunnel/
+
+# Local ADB/UI captures and temporary test artifacts
+minissh-*.xml
+*.log

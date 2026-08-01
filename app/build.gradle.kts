@@ -5,7 +5,6 @@ plugins {
 android {
     namespace = "com.pililo777.minissh"
     compileSdk = 36
-    ndkVersion = "27.3.13750724"
 
     defaultConfig {
         applicationId = "com.pililo777.minissh"
@@ -13,19 +12,21 @@ android {
         targetSdk = 36
         versionCode = 4
         versionName = "0.4"
-
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
-        }
-    }
-
-    externalNativeBuild {
-        ndkBuild {
-            path = file("src/main/jni/Android.mk")
-        }
     }
 }
 
+configurations.configureEach {
+    exclude(group = "com.google.guava", module = "listenablefuture")
+}
+
 dependencies {
+    implementation("androidx.core:core:1.13.1")
+    implementation("com.termux.termux-app:terminal-emulator:0.118.0")
+    implementation("com.termux.termux-app:terminal-view:0.118.0") {
+        exclude(group = "com.google.guava", module = "listenablefuture")
+    }
+    implementation("com.termux.termux-app:termux-shared:0.118.0") {
+        exclude(group = "com.google.guava", module = "listenablefuture")
+    }
     implementation("com.github.mwiede:jsch:2.28.4")
 }
