@@ -6,6 +6,19 @@ android {
     namespace = "com.pililo777.minissh"
     compileSdk = 36
 
+    flavorDimensions += "edition"
+
+    productFlavors {
+        create("stable") {
+            dimension = "edition"
+        }
+        create("background") {
+            dimension = "edition"
+            applicationIdSuffix = ".background"
+            versionNameSuffix = "-background"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.pililo777.minissh"
         minSdk = 29
