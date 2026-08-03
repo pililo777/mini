@@ -487,8 +487,10 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         statusHandler.removeCallbacks(statusPoll)
         debug("onDestroy")
-        // Future phase: ownership will move to SshConnectionService.
-        sshController.close()
+        // Do not close the SSH session here. Android may destroy/recreate the
+        // Activity when the user switches apps; the connection must not depend
+        // on the terminal UI lifecycle. Explicit disconnect remains handled by
+        // the disconnect button.
         super.onDestroy()
     }
 

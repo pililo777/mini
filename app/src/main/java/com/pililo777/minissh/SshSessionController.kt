@@ -170,8 +170,8 @@ class SshSessionController(private val listener: Listener) : AutoCloseable {
     }
 
     fun sendCommand(command: String) {
-        val payload = command.toByteArray(StandardCharsets.UTF_8) + byteArrayOf('\r'.code.toByte())
-        log(generation.get(), "sendEnter commandLength=${command.length} bytes=${hex(payload)} terminator=CR")
+        val payload = command.toByteArray(StandardCharsets.UTF_8) + byteArrayOf('\r'.code.toByte(), '\n'.code.toByte())
+        log(generation.get(), "sendEnter commandLength=${command.length} bytes=${hex(payload)} terminator=CRLF")
         send(payload, "command")
     }
 
