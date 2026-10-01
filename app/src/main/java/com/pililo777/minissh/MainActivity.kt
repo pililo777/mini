@@ -134,25 +134,27 @@ class MainActivity : Activity() {
 
         rootView.addView(TextView(this).apply {
             text = "Mini SSH"
-            textSize = 24f
+            textSize = 20f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, 0, 0, dp(8))
+            setPadding(0, 0, 0, dp(4))
         })
 
         val hostRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         hostField = field("Servidor / IP")
         portField = field("Puerto", InputType.TYPE_CLASS_NUMBER).apply { setText("22") }
-        hostRow.addView(hostField, LinearLayout.LayoutParams(0, dp(52), 1f))
-        hostRow.addView(portField, LinearLayout.LayoutParams(dp(92), dp(52)).apply { marginStart = dp(8) })
+        hostRow.addView(hostField, LinearLayout.LayoutParams(0, dp(44), 1f))
+        hostRow.addView(portField, LinearLayout.LayoutParams(dp(92), dp(44)).apply { marginStart = dp(8) })
         rootView.addView(hostRow)
 
         userField = field("Usuario")
         passwordField = field("Contraseña", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
         fingerprintField = field("Huella SHA256:...")
-        rootView.addView(userField, fullWidth52())
-        rootView.addView(passwordField, fullWidth52())
-        rootView.addView(fingerprintField, fullWidth52())
+        val credentialsRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        credentialsRow.addView(userField, LinearLayout.LayoutParams(0, dp(44), 1f))
+        credentialsRow.addView(passwordField, LinearLayout.LayoutParams(0, dp(44), 1f).apply { marginStart = dp(8) })
+        rootView.addView(credentialsRow)
+        rootView.addView(fingerprintField, fullWidth44())
 
         connectButton = Button(this).apply {
             text = "CONECTAR TERMINAL"
@@ -161,12 +163,12 @@ class MainActivity : Activity() {
                 if (sshController.isConnected()) disconnectTerminal() else connectTerminal()
             }
         }
-        rootView.addView(connectButton)
+        rootView.addView(connectButton, fullWidth48())
 
         vpnStatusView = TextView(this).apply {
             text = "VPN: desconectada"
             setTextColor(Color.LTGRAY)
-            setPadding(dp(4), dp(8), dp(4), dp(4))
+            setPadding(dp(4), dp(4), dp(4), 0)
         }
         rootView.addView(vpnStatusView)
 
@@ -186,8 +188,8 @@ class MainActivity : Activity() {
                 appendTerminal("\nTerminal y VPN desconectadas. Android vuelve a su conexión normal.\n")
             }
         }
-        vpnRow.addView(vpnButton, LinearLayout.LayoutParams(0, dp(52), 1f))
-        vpnRow.addView(disconnectAllButton, LinearLayout.LayoutParams(0, dp(52), 1f).apply { marginStart = dp(8) })
+        vpnRow.addView(vpnButton, LinearLayout.LayoutParams(0, dp(48), 1f))
+        vpnRow.addView(disconnectAllButton, LinearLayout.LayoutParams(0, dp(48), 1f).apply { marginStart = dp(8) })
         rootView.addView(vpnRow)
 
         terminalView = TextView(this).apply {
@@ -282,7 +284,9 @@ class MainActivity : Activity() {
         rootView.post { ViewCompat.requestApplyInsets(rootView) }
     }
 
-    private fun fullWidth52() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52))
+    private fun fullWidth44() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44))
+
+    private fun fullWidth48() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48))
 
     private fun field(hintText: String, inputTypeValue: Int = InputType.TYPE_CLASS_TEXT): EditText =
         EditText(this).apply {
