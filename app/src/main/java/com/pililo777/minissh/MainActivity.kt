@@ -13,6 +13,8 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.View
+import android.view.WindowInsets
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
@@ -21,6 +23,7 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.graphics.Rect
 import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
@@ -43,6 +46,7 @@ class MainActivity : Activity() {
     private lateinit var commandField: EditText
     private lateinit var ctrlButton: Button
     private lateinit var sendButton: Button
+    private lateinit var connectionPanel: LinearLayout
 
     @Volatile private var session: Session? = null
     @Volatile private var shell: ChannelShell? = null
@@ -83,25 +87,27 @@ class MainActivity : Activity() {
             setPadding(0, 0, 0, dp(8))
         })
 
+        connectionPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val hostRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         hostField = field("Servidor / IP")
         portField = field("Puerto", InputType.TYPE_CLASS_NUMBER).apply { setText("22") }
         hostRow.addView(hostField, LinearLayout.LayoutParams(0, dp(52), 1f))
         hostRow.addView(portField, LinearLayout.LayoutParams(dp(92), dp(52)).apply { marginStart = dp(8) })
-        root.addView(hostRow)
+        connectionPanel.addView(hostRow)
 
         userField = field("Usuario")
         passwordField = field("Contraseña", InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
         fingerprintField = field("Huella SHA256:...")
-        root.addView(userField, fullWidth52())
-        root.addView(passwordField, fullWidth52())
-        root.addView(fingerprintField, fullWidth52())
+        connectionPanel.addView(userField, fullWidth52())
+        connectionPanel.addView(passwordField, fullWidth52())
+        connectionPanel.addView(fingerprintField, fullWidth52())
 
         connectButton = Button(this).apply {
             text = "CONECTAR TERMINAL"
             setOnClickListener { if (shell?.isConnected == true) disconnectTerminal() else connectTerminal() }
         }
-        root.addView(connectButton)
+        connectionPanel.addView(connectButton)
+        root.addView(connectionPanel)
 
         vpnStatusView = TextView(this).apply {
             text = "VPN: desconectada"
@@ -200,6 +206,24 @@ class MainActivity : Activity() {
         root.addView(commandRow)
 
         setContentView(root)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            root.setOnApplyWindowInsetsListener { _, insets ->
+                updateConnectionPanelForKeyboard(insets.isVisible(WindowInsets.Type.ime()))
+                insets
+            }
+        } else {
+            root.viewTreeObserver.addOnGlobalLayoutListener {
+                val visibleFrame = Rect()
+                root.getWindowVisibleDisplayFrame(visibleFrame)
+                val keyboardVisible = root.rootView.height - visibleFrame.bottom > dp(160)
+                updateConnectionPanelForKeyboard(keyboardVisible)
+            }
+        }
+    }
+
+    private fun updateConnectionPanelForKeyboard(keyboardVisible: Boolean) {
+        val shouldShowPanel = !keyboardVisible || shell?.isConnected != true
+        connectionPanel.visibility = if (shouldShowPanel) View.VISIBLE else View.GONE
     }
 
     private fun fullWidth52() = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52))
